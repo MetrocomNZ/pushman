@@ -1,0 +1,90 @@
+# Two containers: nginx serves the SPA and proxies /api to FastAPI. The backend
+# is not published — nothing outside the compose network can reach it, which is
+# what lets the API trust X-Forwarded-For and lets the browser stay same-origin.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: update-portal-backend:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:?set AUTH0_DOMAIN in .env}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE in .env}
+      ROLES_CLAIM: ${ROLES_CLAIM:-https://portal.example.com/roles}
+
+      # Same-origin through nginx, so this only matters if you also point a
+      # local `npm run dev` at this backend.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      EXPOSE_OPENAPI: ${EXPOSE_OPENAPI:-false}
+
+      WRITE_LIMIT_PER_MINUTE: ${WRITE_LIMIT_PER_MINUTE:-10}
+      READ_LIMIT_PER_MINUTE: ${READ_LIMIT_PER_MINUTE:-60}
+      GLOBAL_LIMIT_PER_MINUTE: ${GLOBAL_LIMIT_PER_MINUTE:-120}
+      CREDENTIAL_FAILURE_THRESHOLD: ${CREDENTIAL_FAILURE_THRESHOLD:-3}
+      CREDENTIAL_COOLDOWN: ${CREDENTIAL_COOLDOWN:-300}
+      REQUIRE_HTTPS_UPSTREAMS: ${REQUIRE_HTTPS_UPSTREAMS:-true}
+
+      # PBX credentials are NOT listed here. The image's entrypoint turns every
+      # file in /run/secrets into the matching *_FILE variable, so adding a PBX
+      # means adding two files to ./secrets and nothing else. Files keep the
+      # values out of `docker inspect`, /proc and crash dumps.
+      MANAGE_PERMISSION: ${MANAGE_PERMISSION:-manage:systems}
+      ADD_SYSTEM_PER_MINUTE: ${ADD_SYSTEM_PER_MINUTE:-6}
+
+      FIRMWARE_CHECK_PER_MINUTE: ${FIRMWARE_CHECK_PER_MINUTE:-4}
+      FIRMWARE_CHECK_CONCURRENCY: ${FIRMWARE_CHECK_CONCURRENCY:-5}
+    volumes:
+      # The audit trail must outlive the container. It is evidence.
+      - audit:/data
+      - ./secrets:/run/secrets:ro
+      # Firmware targets are operational data an admin edits between releases,
+      # so it is mounted rather than baked into the image.
+      - ./backend/firmware-baseline.json:/app/firmware-baseline.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [portal]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  frontend:
+    build:
+      context: ./frontend
+    image: update-portal-frontend:1.2.0
+    restart: unless-stopped
+    ports:
+      - "${PORTAL_PORT:-8080}:8080"
+    environment:
+      # Public values only. These are compiled into a script the browser reads.
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:?set AUTH0_DOMAIN in .env}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:?set AUTH0_CLIENT_ID in .env}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE in .env}
+      API_BASE: ""
+      TOKEN_CACHE: ${TOKEN_CACHE:-memory}
+    depends_on:
+      backend:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /var/cache/nginx:size=32m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [portal]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+
+volumes:
+  audit:
+
+networks:
+  portal:
+    driver: bridge
